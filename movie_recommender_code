@@ -1,0 +1,185 @@
+# Import required libraries
+
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+from random import randrange
+from scipy.sparse import csr_matrix
+from sklearn.neighbors import NearestNeighbors
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.metrics.pairwise import linear_kernel, cosine_similarity
+
+pd.options.mode.chained_assignment = None 
+
+from google.colab import files
+
+uploaded = files.upload() # Here we will upload the csv files for this problem
+
+for fn in uploaded.keys():
+  print('You uploaded file "{name}" with length {length} bytes'.format(name=fn, length=len(uploaded[fn])))
+  
+movies_df = pd.read_csv('movies.csv')
+tmdb_df = pd.read_csv('links.csv')
+ratings_df = pd.read_csv('ratings.csv')
+movies_metadata = pd.read_csv('movies_metadata.csv')
+
+display(movies_df) 
+display(tmdb_df) 
+
+tmdb_df = pd.merge(movies_df,tmdb_df,on='movieId')
+tmdb_df.head()
+
+display(ratings_df) 
+display(movies_metadata) 
+
+movies_metadata.drop(columns = ['title', 'original_title', 'adult', 'homepage', 'original_language', 'budget', 
+                                'belongs_to_collection', 'release_date', 'revenue', 'runtime', 'status', 'video', 
+                                'poster_path', 'imdb_id', 'production_countries', 'spoken_languages','vote_average',
+                                'vote_count'], inplace = True)
+movies_metadata.rename(columns={'id': 'tmdbId'}, inplace=True)
+
+movies_metadata.head()
+
+movies_df.drop(columns = ['genres'], inplace = True)
+for i in range(len(movies_metadata)):
+    try:
+        movies_metadata.loc[i, 'tmdbId'] = int(movies_metadata.loc[i, 'tmdbId'])
+    except:
+        print(i, movies_metadata.loc[i, 'tmdbId'])
+movies_metadata = movies_metadata.drop([19730, 29503, 35587])
+movies_df = pd.merge(tmdb_df,movies_metadata,on='tmdbId')
+movies_df.drop(columns = ['imdbId','tmdbId'], inplace = True)
+movies_df.head()
+
+movies_df['tagline'] = movies_df['tagline'].fillna('')
+movies_df['overview'] = movies_df['overview'].fillna('')
+movies_df['description'] = movies_df['overview'] + movies_df['tagline']
+movies_df['description'] = movies_df['description'].fillna('')
+movies_df.drop(columns = ['tagline', 'overview'], inplace = True)
+movies_df
+
+ratings_df.drop(columns = ['timestamp'], inplace = True)
+ratings_df.head()
+
+movies_metadata['tagline'].replace('', np.nan, inplace=True)
+movies_metadata.dropna(subset=['tagline'], inplace=True)
+movies_metadata['overview'].replace('', np.nan, inplace=True)
+movies_metadata.dropna(subset=['overview'], inplace=True)
+ 
+movies_metadata.head()
+
+tf = TfidfVectorizer(analyzer='word',ngram_range=(1, 2),min_df=0, stop_words='english')
+tfidf_matrix = tf.fit_transform(movies_df['description'])
+cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
+
+tfidf_matrix2 = tf.fit_transform(movies_df['description'].sample(n=50))
+cosine_sim2 = linear_kernel(tfidf_matrix2, tfidf_matrix2)
+
+print('Correlation of 50 randomly sampled movies')
+ax = sns.heatmap(
+    cosine_sim2, 
+    vmin=-0.03, vmax=0.03, center=0,
+    square=True
+)
+
+titles = movies_df['title']
+indices = pd.Series(movies_df.index, index=movies_df['title'])
+indices
+
+def content_recommender(title):
+    idx = indices[title]
+    sim_scores = list(enumerate(cosine_sim[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    sim_scores = sim_scores[1:6]
+    movie_indices = [i[0] for i in sim_scores]
+    return titles.iloc[movie_indices], sim_scores
+    
+movieid = int(input("Enter Movie ID: "))
+
+random_movie = movieid
+print('Content based Movie Recommendations for')
+print(movies_df.loc[random_movie, 'title'])
+
+rec_titles, rec_scores = content_recommender(random_movie)
+print()
+for i in range(5):
+    print("{} with score: {}".format(rec_titles.iloc[i], rec_scores[i][1]))
+
+df = pd.merge(movies_df,ratings_df,on='movieId')
+movie_ratings = pd.DataFrame()
+movie_ratings['NumReviews'] = df.groupby('title')['rating'].count()
+df = pd.merge(df,movie_ratings,on='title')
+movie_ratings['Rating'] = df.groupby('title')['rating'].mean()
+movie_ratings.sort_values(['NumReviews'],ascending=False).head()
+
+mean_count = movie_ratings['NumReviews'].mean()
+movieRatings = df.query('NumReviews >= @mean_count')
+movieRatings.head()
+
+matrix = movieRatings.pivot_table(columns='userId',index='title',values='rating').fillna(0)
+matrix.head()
+
+plt.imshow(matrix.T, cmap='hot', interpolation='nearest')
+plt.show()
+
+movie_vectors = csr_matrix(matrix.values)
+model_knn = NearestNeighbors(metric = 'cosine', algorithm = 'auto') 
+model_knn.fit(movie_vectors)
+
+def collab_recommender(random_movie):
+    distances, indices = model_knn.kneighbors(matrix.iloc[random_movie,:].values.reshape(1, -1), n_neighbors = 6)
+    movies = []
+    scores = []
+    for i in range(0, len(distances.flatten())):
+        if i == 0:
+            continue
+        else:
+            movies.append(matrix.index[indices.flatten()[i]])
+            scores.append(distances.flatten()[i])
+    return movies, scores
+    
+movieid = int(input("Enter Movie ID: ") )
+
+random_movie = movieid
+print('Recommendations for {0}:\n'.format(matrix.index[random_movie]))
+movies, scores = collab_recommender(random_movie)
+for i in range(len(movies)):
+    print('{}: {}, with distance of {}:'.format(i, movies[i], scores[i]))
+    
+def final_recommendations(liked_movies):
+    recommendations = []
+    for mov in liked_movies:
+        movie = -1
+        for i in range(len(movies_df)):
+            if movies_df.loc[i, 'title'] == mov:
+                movie = i
+                break
+        movs1, scores1 = content_recommender(movie)
+        movs1 = movs1.tolist()
+        for i in range(len(matrix.index)):
+            if matrix.index[i] == mov:
+                movie = i
+                break
+        movs2, scores2 = collab_recommender(movie)
+        recommendations.append(movs1[0])
+        recommendations.append(movs2[0])
+        
+    return recommendations
+    
+userid = int(input("Enter your User ID: ") )
+
+random_user = userid
+
+liked_movies = matrix.iloc[:, random_user].sort_values(ascending=False).head().index.tolist()
+print("User {} likes the movies:".format(random_user))
+for m in liked_movies:
+    print(m)
+rec = final_recommendations(liked_movies)
+print("\nMovie Recommendations for User {}:".format(random_user))
+rec = list(dict.fromkeys(rec)) # Remove duplicate entries
+for r in rec:
+    print(r)
